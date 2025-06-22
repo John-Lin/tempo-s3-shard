@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo-s3-shard-config
+data:
+  config.json: |
+    {
+      "listen_addr": ":8080",
+      "endpoint": "https://your-s3-endpoint.com",
+      "access_key_id": "YOUR_ACCESS_KEY",
+      "secret_access_key": "YOUR_SECRET_KEY",
+      "use_ssl": true,
+      "region": "us-east-1",
+      "buckets": ["tempo-shard1", "tempo-shard2", "tempo-shard3"]
+    }

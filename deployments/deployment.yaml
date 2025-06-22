@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo-s3-shard
+  labels:
+    app: tempo-s3-shard
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: tempo-s3-shard
+  template:
+    metadata:
+      labels:
+        app: tempo-s3-shard
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - tempo-s3-shard
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: tempo-s3-shard
+        image: tempo-s3-shard:latest
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: config
+          mountPath: /etc/tempo-s3-shard
+          readOnly: true
+        env:
+        - name: CONFIG_PATH
+          value: "/etc/tempo-s3-shard/config.json"
+        - name: GOMAXPROCS
+          value: "2"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "1000m"
+      volumes:
+      - name: config
+        configMap:
+          name: tempo-s3-shard-config
