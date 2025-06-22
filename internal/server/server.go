@@ -12,8 +12,10 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/tags"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"tempo-s3-shard/internal/client"
 	"tempo-s3-shard/internal/config"
+	"tempo-s3-shard/internal/metrics"
 )
 
 type TempoS3ShardServer struct {
@@ -45,12 +47,47 @@ func NewTempoS3ShardServer(cfg *config.Config) (*TempoS3ShardServer, error) {
 }
 
 func (s *TempoS3ShardServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	log.Printf("%s %s", r.Method, r.URL.Path)
-	s.mux.ServeHTTP(w, r)
+	
+	// Wrap response writer to capture status code
+	wrapped := &responseWriter{ResponseWriter: w, statusCode: 200}
+	s.mux.ServeHTTP(wrapped, r)
+	
+	// Record metrics
+	duration := time.Since(start).Seconds()
+	path := s.normalizePath(r.URL.Path)
+	metrics.HttpRequestsTotal.WithLabelValues(r.Method, path, strconv.Itoa(wrapped.statusCode)).Inc()
+	metrics.HttpRequestDuration.WithLabelValues(r.Method, path).Observe(duration)
+}
+
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (s *TempoS3ShardServer) normalizePath(path string) string {
+	if path == "/metrics" {
+		return "/metrics"
+	}
+	if path == "/" || path == "" {
+		return "/"
+	}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) >= 2 {
+		return "/" + parts[0] + "/*"
+	}
+	return "/" + parts[0]
 }
 
 func (s *TempoS3ShardServer) setupRoutes() {
 	s.mux.HandleFunc("/", s.handleRequest)
+	s.mux.Handle("/metrics", promhttp.Handler())
 }
 
 func (s *TempoS3ShardServer) handleRequest(w http.ResponseWriter, r *http.Request) {
@@ -144,6 +181,7 @@ func (s *TempoS3ShardServer) handleGetBucketLocation(w http.ResponseWriter, r *h
 }
 
 func (s *TempoS3ShardServer) handleListObjects(w http.ResponseWriter, r *http.Request, bucketName string) {
+	start := time.Now()
 	ctx := context.Background()
 	prefix := r.URL.Query().Get("prefix")
 	delimiter := r.URL.Query().Get("delimiter")
@@ -160,19 +198,32 @@ func (s *TempoS3ShardServer) handleListObjects(w http.ResponseWriter, r *http.Re
 	allObjects := []minio.ObjectInfo{}
 	allPrefixes := []string{}
 	
+	// Record list operation
+	metrics.ListOperationsTotal.WithLabelValues(prefix).Inc()
+	
 	for _, realBucket := range s.clientManager.GetAllBuckets() {
+		bucketStart := time.Now()
 		objCh := s.clientManager.GetClient().ListObjects(ctx, realBucket, minio.ListObjectsOptions{
 			Prefix:    prefix,
 			Recursive: delimiter == "",
 		})
 		
+		bucketObjects := 0
 		for object := range objCh {
 			if object.Err != nil {
 				log.Printf("Error listing objects in bucket %s: %v", realBucket, object.Err)
+				metrics.S3OperationsTotal.WithLabelValues("list", realBucket, "error").Inc()
 				continue
 			}
 			allObjects = append(allObjects, object)
+			bucketObjects++
 		}
+		
+		// Record bucket-specific metrics
+		metrics.S3OperationDuration.WithLabelValues("list", realBucket).Observe(time.Since(bucketStart).Seconds())
+		metrics.S3OperationsTotal.WithLabelValues("list", realBucket, "success").Inc()
+		metrics.ListObjectsCount.WithLabelValues(realBucket).Observe(float64(bucketObjects))
+		metrics.BucketOperationsTotal.WithLabelValues(realBucket, "list").Inc()
 	}
 
 	w.Header().Set("Content-Type", "application/xml")
@@ -211,11 +262,16 @@ func (s *TempoS3ShardServer) handleListObjects(w http.ResponseWriter, r *http.Re
 }
 
 func (s *TempoS3ShardServer) handlePutObject(w http.ResponseWriter, r *http.Request, bucketName, objectKey string) {
+	start := time.Now()
 	ctx := context.Background()
 	targetBucket := s.clientManager.GetBucketForKey(objectKey)
 	
+	// Record hash distribution
+	metrics.HashDistribution.WithLabelValues(targetBucket).Inc()
+	
 	contentLength := r.ContentLength
 	if contentLength < 0 {
+		metrics.S3OperationsTotal.WithLabelValues("put", targetBucket, "error").Inc()
 		http.Error(w, "Content-Length required", http.StatusBadRequest)
 		return
 	}
@@ -230,21 +286,30 @@ func (s *TempoS3ShardServer) handlePutObject(w http.ResponseWriter, r *http.Requ
 	})
 	if err != nil {
 		log.Printf("Error putting object %s to bucket %s: %v", objectKey, targetBucket, err)
+		metrics.S3OperationsTotal.WithLabelValues("put", targetBucket, "error").Inc()
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
+	
+	// Record success metrics
+	metrics.S3OperationsTotal.WithLabelValues("put", targetBucket, "success").Inc()
+	metrics.S3OperationDuration.WithLabelValues("put", targetBucket).Observe(time.Since(start).Seconds())
+	metrics.ObjectSizeBytes.WithLabelValues("put").Observe(float64(contentLength))
+	metrics.BucketOperationsTotal.WithLabelValues(targetBucket, "put").Inc()
 	
 	w.Header().Set("ETag", `"`+info.ETag+`"`)
 	w.WriteHeader(http.StatusOK)
 }
 
 func (s *TempoS3ShardServer) handleGetObject(w http.ResponseWriter, r *http.Request, bucketName, objectKey string) {
+	start := time.Now()
 	ctx := context.Background()
 	targetBucket := s.clientManager.GetBucketForKey(objectKey)
 	
 	object, err := s.clientManager.GetClient().GetObject(ctx, targetBucket, objectKey, minio.GetObjectOptions{})
 	if err != nil {
 		log.Printf("Error getting object %s from bucket %s: %v", objectKey, targetBucket, err)
+		metrics.S3OperationsTotal.WithLabelValues("get", targetBucket, "error").Inc()
 		http.Error(w, "Object not found", http.StatusNotFound)
 		return
 	}
@@ -253,6 +318,7 @@ func (s *TempoS3ShardServer) handleGetObject(w http.ResponseWriter, r *http.Requ
 	info, err := object.Stat()
 	if err != nil {
 		log.Printf("Error getting object stat %s from bucket %s: %v", objectKey, targetBucket, err)
+		metrics.S3OperationsTotal.WithLabelValues("get", targetBucket, "error").Inc()
 		http.Error(w, "Object not found", http.StatusNotFound)
 		return
 	}
@@ -264,18 +330,31 @@ func (s *TempoS3ShardServer) handleGetObject(w http.ResponseWriter, r *http.Requ
 	
 	w.WriteHeader(http.StatusOK)
 	io.Copy(w, object)
+	
+	// Record success metrics
+	metrics.S3OperationsTotal.WithLabelValues("get", targetBucket, "success").Inc()
+	metrics.S3OperationDuration.WithLabelValues("get", targetBucket).Observe(time.Since(start).Seconds())
+	metrics.ObjectSizeBytes.WithLabelValues("get").Observe(float64(info.Size))
+	metrics.BucketOperationsTotal.WithLabelValues(targetBucket, "get").Inc()
 }
 
 func (s *TempoS3ShardServer) handleDeleteObject(w http.ResponseWriter, r *http.Request, bucketName, objectKey string) {
+	start := time.Now()
 	ctx := context.Background()
 	targetBucket := s.clientManager.GetBucketForKey(objectKey)
 	
 	err := s.clientManager.GetClient().RemoveObject(ctx, targetBucket, objectKey, minio.RemoveObjectOptions{})
 	if err != nil {
 		log.Printf("Error deleting object %s from bucket %s: %v", objectKey, targetBucket, err)
+		metrics.S3OperationsTotal.WithLabelValues("delete", targetBucket, "error").Inc()
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
+	
+	// Record success metrics
+	metrics.S3OperationsTotal.WithLabelValues("delete", targetBucket, "success").Inc()
+	metrics.S3OperationDuration.WithLabelValues("delete", targetBucket).Observe(time.Since(start).Seconds())
+	metrics.BucketOperationsTotal.WithLabelValues(targetBucket, "delete").Inc()
 	
 	w.WriteHeader(http.StatusNoContent)
 }

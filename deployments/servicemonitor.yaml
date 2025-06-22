@@ -1,0 +1,16 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: tempo-s3-shard-monitor
+  labels:
+    app: tempo-s3-shard
+spec:
+  selector:
+    matchLabels:
+      app: tempo-s3-shard
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+    honorLabels: true
