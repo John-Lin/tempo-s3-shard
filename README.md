@@ -10,6 +10,10 @@ A high-performance S3-compatible shard server that distributes objects across mu
 - **MinIO Integration**: Uses minio-go client for robust S3 operations
 - **Grafana Tempo Optimized**: Ensures trace data locality for better query performance
 - **HTTPS Support**: Configurable SSL/TLS endpoints with automatic scheme detection
+- **Prometheus Metrics**: Comprehensive observability with detailed metrics for all operations
+- **Structured Logging**: Machine-readable logfmt output for log aggregation and analysis
+- **Multi-platform Docker**: Supports both AMD64 and ARM64 architectures
+- **Kubernetes Ready**: Complete deployment manifests with ServiceMonitor support
 
 ## Supported S3 Operations
 
@@ -156,14 +160,62 @@ Tempo S3 Shard uses **path prefix hashing** instead of full-path hashing for opt
 
 ```
 Client (Tempo) → Tempo S3 Shard → Consistent Hash → Backend Buckets
-                    ↓
-               [bucket1, bucket2, bucket3]
+                    ↓              ↓                    ↓
+                 Metrics      Structured Logs    [bucket1, bucket2, bucket3]
+                    ↓              ↓
+              Prometheus      Log Aggregation
 ```
 
 - **Client**: Grafana Tempo or any S3-compatible client
 - **Tempo S3 Shard**: This application providing S3 API compatibility  
 - **Consistent Hash**: Algorithm determining object→bucket mapping
 - **Backend Buckets**: Multiple S3 buckets for distributed storage
+- **Observability**: Comprehensive metrics and structured logging for monitoring
+
+## Observability & Monitoring
+
+### Prometheus Metrics
+
+Tempo S3 Shard exposes comprehensive metrics at `/metrics` endpoint:
+
+**HTTP Metrics:**
+- `tempo_s3_shard_http_requests_total` - Request count by method/path/status
+- `tempo_s3_shard_http_request_duration_seconds` - Request latency distribution
+
+**S3 Operation Metrics:**
+- `tempo_s3_shard_s3_operations_total` - S3 operation count by type/bucket/status
+- `tempo_s3_shard_s3_operation_duration_seconds` - S3 operation latency
+- `tempo_s3_shard_object_size_bytes` - Object size distribution
+
+**Operational Metrics:**
+- `tempo_s3_shard_hash_distribution_total` - Object distribution across buckets
+- `tempo_s3_shard_list_operations_total` - LIST operation count by prefix
+- `tempo_s3_shard_bucket_operations_total` - Per-bucket operation count
+
+### Structured Logging
+
+All logs are output in machine-readable logfmt format:
+
+```
+time=2025-06-23T00:31:44.729+08:00 level=INFO msg="Starting Tempo S3 Shard Server" listen_addr=:8080 endpoint=https://s3.amazonaws.com buckets=[shard1,shard2,shard3]
+time=2025-06-23T00:31:45.123+08:00 level=INFO msg="HTTP request" method=GET path=/proxy-bucket/single-tenant/trace1/ status=200 duration_ms=12.4 remote_addr=127.0.0.1:45678 user_agent="tempo/1.0"
+time=2025-06-23T00:31:45.135+08:00 level=ERROR msg="Error getting object" object_key=missing-file bucket=shard2 error="The specified key does not exist"
+```
+
+**Log Fields:**
+- **Access Logs**: method, path, status, duration_ms, remote_addr, user_agent
+- **Operation Logs**: object_key, bucket, operation type, error details
+- **Performance Logs**: duration metrics for LIST operations
+
+### Kubernetes Monitoring
+
+Deploy with Prometheus Operator using the included ServiceMonitor:
+
+```bash
+kubectl apply -f deployments/servicemonitor.yaml
+```
+
+The ServiceMonitor automatically configures Prometheus to scrape metrics every 30 seconds.
 
 ## Performance Considerations
 

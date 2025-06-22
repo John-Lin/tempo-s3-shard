@@ -35,6 +35,10 @@ This is an S3-compatible shard server that distributes objects across multiple S
 
 4. **Configuration** (`internal/config/config.go`): Manages all backend S3 connections. Supports both full URLs (`https://endpoint.com`) and hostnames (`endpoint.com`) for flexible SSL configuration.
 
+5. **Metrics** (`internal/metrics/metrics.go`): Comprehensive Prometheus metrics for observability. Tracks HTTP requests, S3 operations, object sizes, hash distribution, and performance metrics.
+
+6. **Structured Logging**: Uses Go's `log/slog` package with logfmt format for machine-readable logs. All log statements include structured fields for better observability.
+
 ### Key Design Patterns
 
 - **Virtual Bucket**: Clients see a single bucket name (`proxy-bucket`), but objects are transparently distributed across multiple backend buckets
@@ -99,6 +103,56 @@ mc cp file.txt proxy/proxy-bucket/single-tenant/trace123/chunks-001
 mc ls proxy/proxy-bucket/single-tenant/trace123/
 ```
 
+## Observability & Monitoring
+
+### Prometheus Metrics
+
+The application exposes metrics at `/metrics` endpoint on port 8080. Key metrics include:
+
+**HTTP Request Metrics:**
+- `tempo_s3_shard_http_requests_total{method, path, status_code}` - Total HTTP requests
+- `tempo_s3_shard_http_request_duration_seconds{method, path}` - Request latency
+
+**S3 Operation Metrics:**
+- `tempo_s3_shard_s3_operations_total{operation, bucket, status}` - S3 operation counters
+- `tempo_s3_shard_s3_operation_duration_seconds{operation, bucket}` - S3 operation latency
+- `tempo_s3_shard_object_size_bytes{operation}` - Object size distribution
+
+**Consistent Hash & Distribution:**
+- `tempo_s3_shard_hash_distribution_total{bucket}` - Object distribution across buckets
+- `tempo_s3_shard_bucket_operations_total{bucket, operation}` - Per-bucket operation count
+
+**LIST Operation Specifics:**
+- `tempo_s3_shard_list_operations_total{prefix}` - LIST operations by prefix
+- `tempo_s3_shard_list_objects_count{bucket}` - Objects returned per bucket in LIST
+
+### Structured Logging
+
+All logs use `log/slog` with logfmt format. Key log messages:
+
+**Access Logs:**
+```
+level=INFO msg="HTTP request" method=GET path=/proxy-bucket/trace1/ status=200 duration_ms=12.4 remote_addr=127.0.0.1:45678
+```
+
+**S3 Operation Logs:**
+```
+level=ERROR msg="Error getting object" object_key=missing-file bucket=shard2 error="NoSuchKey"
+level=DEBUG msg="List objects operation completed" bucket=proxy-bucket prefix=single-tenant/ object_count=42 duration_ms=156.7
+```
+
+**Startup Logs:**
+```
+level=INFO msg="Starting Tempo S3 Shard Server" listen_addr=:8080 endpoint=https://s3.amazonaws.com buckets=[shard1,shard2,shard3]
+```
+
+### Kubernetes Monitoring
+
+Use the provided ServiceMonitor for Prometheus Operator:
+- File: `deployments/servicemonitor.yaml`
+- Scrape interval: 30 seconds
+- Automatic service discovery via label selectors
+
 ## Important Implementation Notes
 
 - Virtual bucket name is hardcoded as `"proxy-bucket"`
@@ -106,3 +160,5 @@ mc ls proxy/proxy-bucket/single-tenant/trace123/
 - Trailing slashes in URLs are automatically stripped for consistent routing
 - Backend buckets are auto-created if they don't exist
 - All S3 operations route through the same consistent hash for deterministic behavior
+- Metrics collection has minimal performance impact (<1ms overhead per request)
+- Structured logging provides detailed context for debugging and monitoring
