@@ -24,6 +24,8 @@ A high-performance S3-compatible shard server that distributes objects across mu
 
 ## Quick Start
 
+### Option 1: Native Binary
+
 1. **Build Tempo S3 Shard**:
    ```bash
    go build -o tempo-s3-shard
@@ -49,6 +51,33 @@ A high-performance S3-compatible shard server that distributes objects across mu
 3. **Start Tempo S3 Shard**:
    ```bash
    ./tempo-s3-shard -config config.json
+   ```
+
+### Option 2: Docker (Recommended)
+
+1. **Build Docker image**:
+   ```bash
+   # For x86_64/amd64 (Intel/AMD processors)
+   docker build -t tempo-s3-shard .
+   
+   # For Apple Silicon M1/M2 (ARM64)
+   docker build --platform linux/arm64 -t tempo-s3-shard .
+   ```
+
+2. **Create config.json** (same format as above)
+
+3. **Run with Docker**:
+   ```bash
+   docker run -d \
+     --name tempo-s3-shard \
+     -p 8080:8080 \
+     -v $(pwd)/config.json:/etc/tempo-s3-shard/config.json:ro \
+     tempo-s3-shard
+   ```
+
+4. **Check logs**:
+   ```bash
+   docker logs tempo-s3-shard
    ```
 
 ## Usage with Grafana Tempo
