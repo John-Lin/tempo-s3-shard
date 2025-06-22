@@ -3,9 +3,10 @@ package server
 import (
 	"context"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -22,9 +23,15 @@ type TempoS3ShardServer struct {
 	mux           *http.ServeMux
 	clientManager *client.S3ClientManager
 	config        *config.Config
+	logger        *slog.Logger
 }
 
 func NewTempoS3ShardServer(cfg *config.Config) (*TempoS3ShardServer, error) {
+	// Initialize structured logger with logfmt format
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	
 	clientManager, err := client.NewS3ClientManager(cfg)
 	if err != nil {
 		return nil, err
@@ -34,13 +41,14 @@ func NewTempoS3ShardServer(cfg *config.Config) (*TempoS3ShardServer, error) {
 	defer cancel()
 	
 	if err := clientManager.EnsureBucketsExist(ctx); err != nil {
-		log.Printf("Warning: failed to ensure buckets exist: %v", err)
+		logger.Warn("Failed to ensure buckets exist", "error", err)
 	}
 
 	s := &TempoS3ShardServer{
 		mux:           http.NewServeMux(),
 		clientManager: clientManager,
 		config:        cfg,
+		logger:        logger,
 	}
 	s.setupRoutes()
 	return s, nil
@@ -48,7 +56,6 @@ func NewTempoS3ShardServer(cfg *config.Config) (*TempoS3ShardServer, error) {
 
 func (s *TempoS3ShardServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	log.Printf("%s %s", r.Method, r.URL.Path)
 	
 	// Wrap response writer to capture status code
 	wrapped := &responseWriter{ResponseWriter: w, statusCode: 200}
@@ -59,6 +66,17 @@ func (s *TempoS3ShardServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := s.normalizePath(r.URL.Path)
 	metrics.HttpRequestsTotal.WithLabelValues(r.Method, path, strconv.Itoa(wrapped.statusCode)).Inc()
 	metrics.HttpRequestDuration.WithLabelValues(r.Method, path).Observe(duration)
+	
+	// Structured access log
+	s.logger.Info("HTTP request",
+		"method", r.Method,
+		"path", r.URL.Path,
+		"status", wrapped.statusCode,
+		"duration_ms", duration*1000,
+		"remote_addr", r.RemoteAddr,
+		"user_agent", r.Header.Get("User-Agent"),
+		"content_length", r.ContentLength,
+	)
 }
 
 type responseWriter struct {
@@ -211,7 +229,7 @@ func (s *TempoS3ShardServer) handleListObjects(w http.ResponseWriter, r *http.Re
 		bucketObjects := 0
 		for object := range objCh {
 			if object.Err != nil {
-				log.Printf("Error listing objects in bucket %s: %v", realBucket, object.Err)
+				s.logger.Error("Error listing objects", "bucket", realBucket, "error", object.Err)
 				metrics.S3OperationsTotal.WithLabelValues("list", realBucket, "error").Inc()
 				continue
 			}
@@ -258,6 +276,15 @@ func (s *TempoS3ShardServer) handleListObjects(w http.ResponseWriter, r *http.Re
 	xml += `
 </ListBucketResult>`
 	
+	// Record overall list operation metrics
+	duration := time.Since(start).Seconds()
+	s.logger.Debug("List objects operation completed",
+		"bucket", bucketName,
+		"prefix", prefix,
+		"object_count", len(allObjects),
+		"duration_ms", duration*1000,
+	)
+	
 	w.Write([]byte(xml))
 }
 
@@ -285,7 +312,7 @@ func (s *TempoS3ShardServer) handlePutObject(w http.ResponseWriter, r *http.Requ
 		ContentType: contentType,
 	})
 	if err != nil {
-		log.Printf("Error putting object %s to bucket %s: %v", objectKey, targetBucket, err)
+		s.logger.Error("Error putting object", "object_key", objectKey, "bucket", targetBucket, "error", err)
 		metrics.S3OperationsTotal.WithLabelValues("put", targetBucket, "error").Inc()
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
@@ -308,7 +335,7 @@ func (s *TempoS3ShardServer) handleGetObject(w http.ResponseWriter, r *http.Requ
 	
 	object, err := s.clientManager.GetClient().GetObject(ctx, targetBucket, objectKey, minio.GetObjectOptions{})
 	if err != nil {
-		log.Printf("Error getting object %s from bucket %s: %v", objectKey, targetBucket, err)
+		s.logger.Error("Error getting object", "object_key", objectKey, "bucket", targetBucket, "error", err)
 		metrics.S3OperationsTotal.WithLabelValues("get", targetBucket, "error").Inc()
 		http.Error(w, "Object not found", http.StatusNotFound)
 		return
@@ -317,7 +344,7 @@ func (s *TempoS3ShardServer) handleGetObject(w http.ResponseWriter, r *http.Requ
 	
 	info, err := object.Stat()
 	if err != nil {
-		log.Printf("Error getting object stat %s from bucket %s: %v", objectKey, targetBucket, err)
+		s.logger.Error("Error getting object stat", "object_key", objectKey, "bucket", targetBucket, "error", err)
 		metrics.S3OperationsTotal.WithLabelValues("get", targetBucket, "error").Inc()
 		http.Error(w, "Object not found", http.StatusNotFound)
 		return
@@ -345,7 +372,7 @@ func (s *TempoS3ShardServer) handleDeleteObject(w http.ResponseWriter, r *http.R
 	
 	err := s.clientManager.GetClient().RemoveObject(ctx, targetBucket, objectKey, minio.RemoveObjectOptions{})
 	if err != nil {
-		log.Printf("Error deleting object %s from bucket %s: %v", objectKey, targetBucket, err)
+		s.logger.Error("Error deleting object", "object_key", objectKey, "bucket", targetBucket, "error", err)
 		metrics.S3OperationsTotal.WithLabelValues("delete", targetBucket, "error").Inc()
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
@@ -365,7 +392,7 @@ func (s *TempoS3ShardServer) handleHeadObject(w http.ResponseWriter, r *http.Req
 	
 	info, err := s.clientManager.GetClient().StatObject(ctx, targetBucket, objectKey, minio.StatObjectOptions{})
 	if err != nil {
-		log.Printf("Error getting object stat %s from bucket %s: %v", objectKey, targetBucket, err)
+		s.logger.Error("Error getting object stat for HEAD", "object_key", objectKey, "bucket", targetBucket, "error", err)
 		http.Error(w, "Object not found", http.StatusNotFound)
 		return
 	}
@@ -384,7 +411,7 @@ func (s *TempoS3ShardServer) handleGetObjectTagging(w http.ResponseWriter, r *ht
 	
 	tags, err := s.clientManager.GetClient().GetObjectTagging(ctx, targetBucket, objectKey, minio.GetObjectTaggingOptions{})
 	if err != nil {
-		log.Printf("Error getting object tags %s from bucket %s: %v", objectKey, targetBucket, err)
+		s.logger.Error("Error getting object tags", "object_key", objectKey, "bucket", targetBucket, "error", err)
 		http.Error(w, "Object not found", http.StatusNotFound)
 		return
 	}
@@ -442,7 +469,7 @@ func (s *TempoS3ShardServer) handlePutObjectTagging(w http.ResponseWriter, r *ht
 	
 	err = s.clientManager.GetClient().PutObjectTagging(ctx, targetBucket, objectKey, objectTags, minio.PutObjectTaggingOptions{})
 	if err != nil {
-		log.Printf("Error putting object tags %s to bucket %s: %v", objectKey, targetBucket, err)
+		s.logger.Error("Error putting object tags", "object_key", objectKey, "bucket", targetBucket, "error", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}

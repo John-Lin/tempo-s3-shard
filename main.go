@@ -3,32 +3,43 @@ package main
 import (
 	"flag"
 	"log"
+	"log/slog"
 	"net/http"
+	"os"
 
 	"tempo-s3-shard/internal/config"
 	"tempo-s3-shard/internal/server"
 )
 
 func main() {
+	// Initialize structured logger with logfmt format
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	
 	configFile := flag.String("config", "config.json", "Path to configuration file")
 	flag.Parse()
 
 	cfg, err := config.LoadConfig(*configFile)
 	if err != nil {
-		log.Printf("Failed to load config file, using defaults: %v", err)
+		logger.Warn("Failed to load config file, using defaults", "error", err)
 		cfg = config.DefaultConfig()
 	}
 
-	log.Printf("Starting Tempo S3 Shard Server on %s", cfg.ListenAddr)
-	log.Printf("Backend S3 endpoint: %s", cfg.Endpoint)
-	log.Printf("Managing buckets: %v", cfg.Buckets)
+	logger.Info("Starting Tempo S3 Shard Server",
+		"listen_addr", cfg.ListenAddr,
+		"endpoint", cfg.Endpoint,
+		"buckets", cfg.Buckets,
+	)
 	
 	s3Server, err := server.NewTempoS3ShardServer(cfg)
 	if err != nil {
-		log.Fatal("Failed to create Tempo S3 shard server:", err)
+		logger.Error("Failed to create Tempo S3 shard server", "error", err)
+		log.Fatal("Failed to create server")
 	}
 	
 	if err := http.ListenAndServe(cfg.ListenAddr, s3Server); err != nil {
-		log.Fatal("Server failed to start:", err)
+		logger.Error("Server failed to start", "error", err)
+		log.Fatal("Server startup failed")
 	}
 }
