@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/url"
 	"os"
 	"strings"
@@ -15,6 +16,7 @@ type Config struct {
 	UseSSL          bool     `json:"use_ssl"`
 	Region          string   `json:"region"`
 	Buckets         []string `json:"buckets"`
+	LogLevel        string   `json:"log_level,omitempty"`
 }
 
 func LoadConfig(filename string) (*Config, error) {
@@ -26,6 +28,11 @@ func LoadConfig(filename string) (*Config, error) {
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, err
+	}
+
+	// Set default log level if not specified
+	if config.LogLevel == "" {
+		config.LogLevel = "info"
 	}
 
 	return &config, nil
@@ -52,6 +59,22 @@ func (c *Config) ParsedEndpoint() (host string, useSSL bool, err error) {
 	return host, useSSL, nil
 }
 
+// GetLogLevel converts string log level to slog.Level
+func (c *Config) GetLogLevel() slog.Level {
+	switch strings.ToLower(c.LogLevel) {
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
 func DefaultConfig() *Config {
 	return &Config{
 		ListenAddr:      ":8080",
@@ -61,5 +84,6 @@ func DefaultConfig() *Config {
 		UseSSL:          false,
 		Region:          "us-east-1",
 		Buckets:         []string{"bucket1", "bucket2", "bucket3"},
+		LogLevel:        "info",
 	}
 }

@@ -29,7 +29,7 @@ type TempoS3ShardServer struct {
 func NewTempoS3ShardServer(cfg *config.Config) (*TempoS3ShardServer, error) {
 	// Initialize structured logger with logfmt format
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: cfg.GetLogLevel(),
 	}))
 	
 	clientManager, err := client.NewS3ClientManager(cfg)
